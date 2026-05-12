@@ -401,7 +401,7 @@ namespace ElevatorSimulation
 
             double waitTime = r.BoardTime - r.CreateTime;
             double serviceTime = r.FinishTime - r.BoardTime;
-
+            
             totalWait += waitTime;
             totalServiceTime += serviceTime;
             served++;
