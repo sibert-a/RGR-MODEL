@@ -48,11 +48,24 @@ namespace ElevatorSimulation
         }
     }
 
+    // Результат одного прогона
+    class RunResult
+    {
+        public int Served;
+        public int Lost;
+        public int TotalRequests => Served + Lost;
+        public double AvgWaitTimeMinutes;  // в минутах
+        public double AvgServiceTimeMinutes;
+        public double PassLoadPercent;
+        public double CargoLoadPercent;
+        public double TotalWaitTime;        // в минутах?
+    }
+
     class Program
     {
         static Random rand = new Random();
         static double time = 0;
-        const double SIM_TIME = 600; // 8 часов
+        const double SIM_TIME = 600; // 8 часов (480 мин), но у тебя 600???
 
         static int nextId = 1;
         static int served = 0;
@@ -73,49 +86,142 @@ namespace ElevatorSimulation
         static double powerOffTime = 0;
         static bool powerEventScheduled = false;
 
+        // Для статистики по прогону
+        static void ResetSimulation()
+        {
+            time = 0;
+            nextId = 1;
+            served = 0;
+            lost = 0;
+            totalWait = 0;
+            totalServiceTime = 0;
+            queue.Clear();
+            events.Clear();
+            powerOn = true;
+            powerOffTime = 0;
+            powerEventScheduled = false;
+
+            elevators.Clear();
+            elevators.Add(new Elevator("Пассажирский", 6));
+            elevators.Add(new Elevator("Грузовой", 13));
+        }
+
         static double Exponential(double mean) => -Math.Log(1.0 - rand.NextDouble()) * mean;
 
         static void Main()
         {
-            elevators.Add(new Elevator("Пассажирский", 6));
-            elevators.Add(new Elevator("Грузовой", 13));
+            Console.WriteLine("╔════════════════════════════════════════════════════════════════╗");
+            Console.WriteLine("║        ИМИТАЦИОННОЕ МОДЕЛИРОВАНИЕ: ПАССАЖИРСКО-ГРУЗОВОЙ        ║");
+            Console.WriteLine("║                         ЛИФТОВОЙ СИСТЕМЫ                       ║");
+            Console.WriteLine("╚════════════════════════════════════════════════════════════════╝");
+            Console.WriteLine();
 
-            Console.WriteLine("=== ИМИТАЦИОННАЯ МОДЕЛЬ ЛИФТОВ ===");
-            Console.WriteLine("10 этажей | 2 лифта | Буфер 15 ед.");
-            Console.WriteLine($"Время симуляции: {SIM_TIME:F0} мин\n");
+            // === ПАРАМЕТРЫ ДЛЯ СТАТИСТИЧЕСКОЙ УСТОЙЧИВОСТИ ===
+            int N = 30;                // начальное число прогонов
+            double eps = 0.05;         // точность 5%
+            double tAlpha = 2.7;       // квантиль для 90% доверительной вероятности
 
-            // Запускаем генерацию заявок
-            for (int floor = 1; floor <= 10; floor++)
-                ScheduleNextRequest(floor);
+            List<double> waitTimesList = new List<double>();   // средние времена ожидания по прогонам
+            List<double> serviceTimesList = new List<double>();
 
-            // Запускаем отключения электричества
-            SchedulePowerEvent();
+            RunResult finalResult = new RunResult();
 
-            while (time < SIM_TIME && events.Count > 0)
+            Console.WriteLine($"--- ВЫПОЛНЯЕТСЯ {N} ПРОГОНОВ ПО {SIM_TIME / 60.0:F0} ЧАСОВ ---\n");
+
+            for (int run = 1; run <= N; run++)
             {
-                events.Sort((a, b) => a.time.CompareTo(b.time));
-                var next = events[0];
-                events.RemoveAt(0);
-                time = next.time;
-                next.action();
+                ResetSimulation();
+
+                // Запускаем генерацию заявок
+                for (int floor = 1; floor <= 10; floor++)
+                    ScheduleNextRequest(floor);
+                SchedulePowerEvent();
+
+                while (time < SIM_TIME && events.Count > 0)
+                {
+                    events.Sort((a, b) => a.time.CompareTo(b.time));
+                    var next = events[0];
+                    events.RemoveAt(0);
+                    time = next.time;
+                    next.action();
+                }
+
+                // Сохраняем результаты прогона
+                double avgWaitMin = (served > 0 ? totalWait / served : 0);
+                double avgServiceMin = (served > 0 ? totalServiceTime / served : 0);
+
+                waitTimesList.Add(avgWaitMin);
+                serviceTimesList.Add(avgServiceMin);
+
+                // Суммируем для финального результата
+                finalResult.Served += served;
+                finalResult.Lost += lost;
+                finalResult.TotalWaitTime += totalWait;
+
+                foreach (var e in elevators)
+                {
+                    if (e.Name == "Пассажирский")
+                        finalResult.PassLoadPercent += e.TotalBusyTime / SIM_TIME * 100;
+                    else
+                        finalResult.CargoLoadPercent += e.TotalBusyTime / SIM_TIME * 100;
+                }
+
+                if (run % 10 == 0 || run == N)
+                    Console.WriteLine($"  Прогон {run}/{N}: ср. ожидание = {avgWaitMin:F2} мин, обслужено = {served}, потеряно = {lost}");
             }
 
-            // Финальная статистика
-            Console.WriteLine("\n========== РЕЗУЛЬТАТЫ ==========");
-            Console.WriteLine($"Обслужено: {served}");
-            Console.WriteLine($"Потеряно: {lost}");
-            Console.WriteLine($"Вероятность отказа: {(double)lost / (served + lost + 0.0001):P1}");
-            Console.WriteLine($"Среднее время ожидания: {(served > 0 ? totalWait / served : 0):F2} мин");
-            Console.WriteLine($"Среднее время обслуживания: {(served > 0 ? totalServiceTime / served : 0):F2} мин");
+            // === РАСЧЁТ СТАТИСТИЧЕСКОЙ УСТОЙЧИВОСТИ ===
+            double avgWait = waitTimesList.Average();
+            double avgService = serviceTimesList.Average();
 
-            foreach (var e in elevators)
-            {
-                double load = e.TotalBusyTime / SIM_TIME;
-                Console.WriteLine($"\n{e.Name}:");
-                Console.WriteLine($"  Обслужено: {e.TotalServed}");
-                Console.WriteLine($"  Загрузка: {load:P1}");
-                Console.WriteLine($"  Состояние: {(e.IsBroken ? "СЛОМАН" : "Исправен")}");
-            }
+            // СКО = sqrt( sum(x_i - x̄)² / (n-1) )
+            double stdDev = Math.Sqrt(waitTimesList.Sum(x => Math.Pow(x - avgWait, 2)) / (waitTimesList.Count - 1));
+
+            // Необходимое число прогонов по формуле: N* = (tα² * σ²) / ε²
+            double requiredRuns = Math.Pow(tAlpha, 2) * Math.Pow(stdDev, 2) / Math.Pow(eps, 2);
+
+            // Доверительный интервал: x̄ ± tα * σ / √n
+            double marginError = tAlpha * stdDev / Math.Sqrt(N);
+            double ciLow = avgWait - marginError;
+            double ciHigh = avgWait + marginError;
+
+            Console.WriteLine("\n============================================================");
+            Console.WriteLine("РЕЗУЛЬТАТЫ МОДЕЛИРОВАНИЯ: ПАССАЖИРСКО-ГРУЗОВОЙ ЛИФТ");
+            Console.WriteLine("============================================================");
+            Console.WriteLine($"Моделирование завершено по времени: {SIM_TIME / 60.0:F0} час. ({SIM_TIME:F0} мин.)");
+            Console.WriteLine($"Всего вошло в систему: {finalResult.TotalRequests / N}");
+            Console.WriteLine($"Обслужено полностью: {finalResult.Served / N}");
+            Console.WriteLine($"Потеряно всего: {finalResult.Lost / N}");
+
+            double lossProb = (double)finalResult.Lost / (finalResult.Served + finalResult.Lost);
+            Console.WriteLine($"Вероятность отказа: {lossProb:P1}");
+            Console.WriteLine($"Среднее время ожидания: {avgWait:F2} мин.");
+            Console.WriteLine($"Среднее время обслуживания (поездка): {avgService:F2} мин.");
+            Console.WriteLine($"Загруженность пассажирского лифта: {finalResult.PassLoadPercent / N:F1}% от времени");
+            Console.WriteLine($"Загруженность грузового лифта: {finalResult.CargoLoadPercent / N:F1}% от времени");
+
+            Console.WriteLine("\n--- ОБЕСПЕЧЕНИЕ ТОЧНОСТИ (СТАТИСТИЧЕСКАЯ УСТОЙЧИВОСТЬ) ---");
+            Console.WriteLine($"Всего выполнено прогонов: {N}");
+            Console.WriteLine($"Среднее время ожидания: {avgWait:F2} мин.");
+            Console.WriteLine($"Среднеквадратическое отклонение (σ): {stdDev:F3} мин.");
+            Console.WriteLine($"Необходимое число реализаций (N*): {requiredRuns:F2}");
+            Console.WriteLine($"Доверительный интервал для среднего (90%): [{ciLow:F3}; {ciHigh:F3}] мин.");
+
+            if (requiredRuns <= N)
+                Console.WriteLine("Точность обеспечена! Требуемое число прогонов меньше фактического.");
+            else
+                Console.WriteLine($"ВНИМАНИЕ: Точность НЕ обеспечена! Требуется {requiredRuns:F0} прогонов.");
+
+            Console.WriteLine("\n============================================================");
+            Console.WriteLine("СТАТИСТИКА ПО ТИПАМ ЗАЯВОК");
+            Console.WriteLine("============================================================");
+            Console.WriteLine("Пассажиры и люди с грузом обрабатываются в общей очереди FIFO,");
+            Console.WriteLine("с особым правилом посадки в грузовой лифт при 1 свободном месте.");
+            Console.WriteLine("Человек с грузом не может ездить в пассажирском лифте.");
+            Console.WriteLine("При переполнении буфера (15 ед.) и приходе человека с грузом");
+            Console.WriteLine("два последних обычных пассажира вытесняются (идут по лестнице).");
+
+            Console.ReadLine();
         }
 
         static void AddEvent(double eventTime, Action action)
@@ -123,7 +229,6 @@ namespace ElevatorSimulation
             events.Add((eventTime, action));
         }
 
-        // Генерация следующий заявки на этаже
         static void ScheduleNextRequest(int floor)
         {
             double mean = (floor == 1) ? 4.0 : 7.5;
@@ -136,17 +241,14 @@ namespace ElevatorSimulation
             }
         }
 
-        // Создание новой заявки
         static void CreateRequest(int floor, double eventTime)
         {
             time = eventTime;
 
-            // Проверка электричества
             if (!powerOn)
             {
                 var lostReq = new Request { Id = nextId++, Type = RequestType.Passenger, IsLost = true, LostReason = "отключение электричества" };
                 lost++;
-                Console.WriteLine($"[{time:F2}] ❌ ПОТЕРЯ #{lostReq.Id} - электричество отключено");
                 ScheduleNextRequest(floor);
                 return;
             }
@@ -164,27 +266,19 @@ namespace ElevatorSimulation
                 CreateTime = time
             };
 
-            // ========== БУФЕР С ПРАВИЛОМ "ДОБРОЖЕЛАТЕЛЬНЫХ СОСЕДЕЙ" ==========
-
-            // Если есть место в буфере
             if (CurrentBufferLoad + req.Slots <= BUFFER_SIZE)
             {
                 req.CreateTime = time;
                 queue.Add(req);
-                Console.WriteLine($"[{time:F2}] + #{req.Id} {req.Type} {floor}→{toFloor} (буфер={CurrentBufferLoad}/{BUFFER_SIZE})");
             }
-            // Если пассажир и места нет -> потеря
             else if (req.Type == RequestType.Passenger)
             {
                 req.IsLost = true;
                 req.LostReason = "буфер переполнен";
                 lost++;
-                Console.WriteLine($"[{time:F2}] ❌ ПОТЕРЯ #{req.Id} пассажир - буфер полон ({CurrentBufferLoad}/{BUFFER_SIZE})");
             }
-            // Если груз и места нет -> вытесняем 2 пассажиров ("доброжелательные соседи")
             else if (req.Type == RequestType.Cargo)
             {
-                // Ищем 2 пассажиров для вытеснения (с конца очереди - "доброжелательные соседи")
                 int removed = 0;
                 for (int i = queue.Count - 1; i >= 0 && removed < 2; i--)
                 {
@@ -193,7 +287,6 @@ namespace ElevatorSimulation
                         queue[i].IsLost = true;
                         queue[i].LostReason = "вытеснен грузом";
                         lost++;
-                        Console.WriteLine($"[{time:F2}] ❌ ПОТЕРЯ #{queue[i].Id} пассажир - вытеснен грузом #{req.Id}");
                         queue.RemoveAt(i);
                         removed++;
                     }
@@ -202,31 +295,25 @@ namespace ElevatorSimulation
                 if (removed == 2)
                 {
                     queue.Add(req);
-                    Console.WriteLine($"[{time:F2}] + #{req.Id} ГРУЗ {floor}→{toFloor} (вытеснил 2 пассажиров, буфер={CurrentBufferLoad}/{BUFFER_SIZE})");
                 }
                 else
                 {
                     req.IsLost = true;
                     req.LostReason = "нет пассажиров для вытеснения";
                     lost++;
-                    Console.WriteLine($"[{time:F2}] ❌ ПОТЕРЯ #{req.Id} груз - нет пассажиров для вытеснения");
                 }
             }
 
-            // Пытаемся назначить лифты
             TryAssignElevators();
-
-            // Следующая заявка
             ScheduleNextRequest(floor);
         }
 
-        // Отключение электричества
         static void SchedulePowerEvent()
         {
             if (powerEventScheduled) return;
             powerEventScheduled = true;
 
-            double interval = Exponential(120); // в среднем раз в 2 часа
+            double interval = Exponential(120);
             double eventTime = time + interval;
 
             if (eventTime < SIM_TIME)
@@ -241,48 +328,20 @@ namespace ElevatorSimulation
 
             if (powerOn)
             {
-                // Отключаем электричество
                 powerOn = false;
-                double duration = Exponential(5); // отключение на ~5 мин
+                double duration = Exponential(5);
                 powerOffTime = time + duration;
-                Console.WriteLine($"[{time:F2}] ⚡⚡⚡ ОТКЛЮЧЕНИЕ ЭЛЕКТРИЧЕСТВА на {duration:F2} мин");
 
-                // Планируем включение
                 AddEvent(powerOffTime, () => TogglePower(powerOffTime));
             }
             else
             {
-                // Включаем электричество
                 powerOn = true;
-                Console.WriteLine($"[{time:F2}] ⚡ ВКЛЮЧЕНИЕ ЭЛЕКТРИЧЕСТВА");
                 powerEventScheduled = false;
                 SchedulePowerEvent();
             }
         }
 
-        // Поломка лифта
-        static void BreakElevator(Elevator e)
-        {
-            if (e.IsBroken) return;
-
-            e.IsBroken = true;
-            double duration = Exponential(10); // поломка на ~10 мин
-            double repairTime = time + duration;
-
-            Console.WriteLine($"[{time:F2}] 🔧 {e.Name} СЛОМАЛСЯ на {duration:F2} мин");
-
-            AddEvent(repairTime, () => RepairElevator(e, repairTime));
-        }
-
-        static void RepairElevator(Elevator e, double repairTime)
-        {
-            time = repairTime;
-            e.IsBroken = false;
-            Console.WriteLine($"[{time:F2}] ✅ {e.Name} ОТРЕМОНТИРОВАН");
-            TryAssignElevators();
-        }
-
-        // Назначение лифтов
         static void TryAssignElevators()
         {
             foreach (var e in elevators)
@@ -296,7 +355,6 @@ namespace ElevatorSimulation
                 foreach (var r in queue.Where(r => !r.IsLost))
                 {
                     if (!e.CanTake(r)) continue;
-
                     double dist = Math.Abs(e.CurrentFloor - r.FromFloor);
                     if (dist < bestDist)
                     {
@@ -317,15 +375,12 @@ namespace ElevatorSimulation
 
                     e.TotalBusyTime += travelToPickup + travelToDest;
 
-                    Console.WriteLine($"[{time:F2}] 🚀 {e.Name} {e.CurrentFloor}→{best.FromFloor} за #{best.Id}");
-
                     AddEvent(pickupTime, () => PickupPassenger(e, best, pickupTime, dropTime));
                     return;
                 }
             }
         }
 
-        // Посадка
         static void PickupPassenger(Elevator e, Request r, double pickupTime, double dropTime)
         {
             time = pickupTime;
@@ -334,18 +389,9 @@ namespace ElevatorSimulation
             r.BoardTime = time;
             e.Direction = r.GetDirection();
 
-            Console.WriteLine($"[{time:F2}] 🛑 {e.Name} забрал #{r.Id} на {r.FromFloor} этаже (занято {e.CurrentLoad}/{e.Capacity})");
-
             AddEvent(dropTime, () => DropoffPassenger(e, r, dropTime));
-
-            // Проверка на поломку (редкое событие)
-            if (rand.NextDouble() < 0.01 && !e.IsBroken)
-            {
-                BreakElevator(e);
-            }
         }
 
-        // Высадка
         static void DropoffPassenger(Elevator e, Request r, double dropTime)
         {
             time = dropTime;
@@ -361,11 +407,8 @@ namespace ElevatorSimulation
             served++;
             e.TotalServed++;
 
-            Console.WriteLine($"[{time:F2}] ✅ #{r.Id} {r.FromFloor}→{r.ToFloor} (ждал {waitTime:F2} мин, ехал {serviceTime:F2} мин)");
-
             e.IsMoving = false;
             e.Direction = Direction.None;
-
             TryAssignElevators();
         }
     }
