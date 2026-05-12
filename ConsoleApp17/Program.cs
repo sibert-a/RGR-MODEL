@@ -220,6 +220,7 @@ namespace ElevatorSimulation
             Console.WriteLine("Человек с грузом не может ездить в пассажирском лифте.");
             Console.WriteLine("При переполнении буфера (15 ед.) и приходе человека с грузом");
             Console.WriteLine("два последних обычных пассажира вытесняются (идут по лестнице).");
+            Console.WriteLine("");
 
             Console.ReadLine();
         }
